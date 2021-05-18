@@ -37,14 +37,19 @@ class Connection {
         return new RedisMap(this, ...args)
     }
     close() {
+        // TODO can we detect if there are things waiting on this, 
+        // and maybe cancel them?
         this.redis.disconnect()
         this.sub.disconnect()    
     }
-    ifDead(peer, value, timeout=2000) {
+    ifDead(peer, value, timeout=200) {
         // resolve to value if peer is dead,
         // otherwise never resolves
         return new Promise((resolve) => {
-            const timer = setTimeout(() => resolve(value), timeout);
+            const timer = setTimeout(() => {
+                debug(peer, 'is dead');
+                resolve(value);
+            }, timeout);
             addCallback(this.pings, peer, () => clearTimeout(timer));
             this.redis.publish(peer, 'ping '+this.client)
         })
