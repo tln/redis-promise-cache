@@ -9,53 +9,68 @@ async function connect(redisOptions) {
 exports.connect = connect
 
 class Connection {
-    constructor(redisOptions) {
+    constructor(redisOptions={}) {
         redisOptions.lazyConnect = true;
         this.redis = new Redis(redisOptions)
         this.sub = new Redis(redisOptions)
         this.client = 'client_'+Date.now()+'_'+process.pid
         this.callbacks = {}
         this.pings = {}
-        this.promises = {}
+        this.promises = {length: 0}
     }
     async connect() {
         await Promise.all([this.redis.connect(), this.sub.connect()])
         const clientHandler = shift(dispatch({
-            ping: peer => this.redis.publish(peer, 'pong '+client),
+            ping: peer => this.redis.publish(peer, 'pong '+this.client),
             pong: dispatch(this.pings, {once: true}),
         }))
-        sub.on('message', listHandler([
+        this.sub.on('message', listHandler([
             logHandler('message'),
             channelsHandler({[this.client]: clientHandler}),
             dispatch(this.callbacks, {once: true, unsub: true}),
             logHandler('unhandled')
         ]))
-        await this.sub.subscribe(client)
+        await this.sub.subscribe(this.client)
+        return this
     }
     Map(...args) {
         return new RedisMap(this, ...args)
     }
     close() {
-        redis.disconnect()
-        sub.disconnect()    
+        this.redis.disconnect()
+        this.sub.disconnect()    
+    }
+    ifDead(peer, value, timeout=2000) {
+        // resolve to value if peer is dead,
+        // otherwise never resolves
+        return new Promise((resolve) => {
+            const timer = setTimeout(() => resolve(value), timeout);
+            addCallback(this.pings, peer, () => clearTimeout(timer));
+            this.redis.publish(peer, 'ping '+this.client)
+        })
+
     }
     ping(peer, timeout=2000) {
+        // ping peer, resolve to elapsed time or reject if peer is dead
         const start = Date.now()
         return new Promise((resolve, reject) => {
             const timer = setTimeout(() => reject('no pong from '+peer), timeout);
-            addCallback(this.pings, peer, () => (clearTimeout(timer), resolve(Date.now() - start)))
-            this.redis.publish(peer, 'ping '+client)
+            addCallback(this.pings, peer, () => {
+                clearTimeout(timer);
+                resolve(Date.now() - start)
+            })
+            this.redis.publish(peer, 'ping '+this.client)
         })
     }
     subOnce(channel, callback) {
         addCallback(this.callbacks, channel, callback)
         this.sub.subscribe(channel)
     }
-    storePromise(value, callback) {
+    storePromise(promise, callback) {
         const id = this.promises.length++;
-        this.promises[id] = value
-        const token = `promise-${client}-${id}`
-        this.resolvePromise(token, value, callback)
+        this.promises[id] = promise
+        const token = `promise-${this.client}-${id}`
+        this.resolvePromise(token, promise, callback)
         return token
     }
     async resolvePromise(token, promise, callback) {
@@ -71,32 +86,32 @@ class Connection {
         debug('publish', token, redisString)
         this.redis.publish(token, redisString)
     }
-    waitForPromise(token) {
+    waitForPromise(token, fallback) {
         let [_, promiseClient, id] = token.split('-')
         if (promiseClient == this.client) {
             // TODO Can we delete it now?
             return this.promises[id];
         } else {
             debug('waiting for', promiseClient, id)
-            this.ping(promiseClient)
-            return new Promise(resolve => 
+            const promise = new Promise(resolve => 
                 this.subOnce(token, message => resolve(fromRedis(message)))
             )
+            return Promise.race([promise, this.ifDead(promiseClient).then(fallback)])
         }
     }
-    toRedis(value, callback) {
+    toRedis(value, writeback) {
         if (util.types.isPromise(value)) {
             debug('storing a promise')
-            return this.storePromise(value, callback)
+            return this.storePromise(value, writeback)
         } else if (value instanceof Tombstone) {
             return value.toRedis()
         }
         return JSON.stringify(value)
     }
-    fromRedis(data) {
+    fromRedis(data, fallback) {
         if (data === null) return null
         if (Tombstone.isTombstone(data)) return Tombstone.dataToTombstone(data)
-        if (isPromiseToken(data)) return this.waitForPromise(data)
+        if (isPromiseToken(data)) return this.waitForPromise(data, fallback)
         try {
             return JSON.parse(data)
         } catch(e) {
@@ -125,10 +140,12 @@ function channelsHandler(channels, unhandled=drop) {
         return handler(channel, message)
     }
 }
-function dispatch(callbacks, {once=false, unsub=false}) {
+function dispatch(callbacks, {once=false, unsub=false}={}) {
     return (channel, message) => {
-        if (!callbacks[channel]) return false;
-        callbacks[channel].forEach(fn => fn(message));
+        const cb = callbacks[channel]
+        if (!cb) return false;
+        if (typeof cb === 'function') cb(message)
+        else cb.forEach(fn => fn(message))
         if (once) delete callbacks[channel]
         if (unsub) sub.unsubscribe(channel)
         return true;
@@ -152,8 +169,9 @@ class Tombstone {
     constructor(error) {
         this.error = error
     }
-    static isTombstone(string) { 
-        return string.startsWith('tombstone ')
+    static isTombstone(value) {
+        if (typeof value === 'string') return value.startsWith('tombstone ')
+        else return value instanceof Tombstone
     }
     static dataToTombstone(string) {
         console.assert(Tombstone.isTombstone(string))
@@ -174,12 +192,19 @@ class RedisMap {
         this.hkey = hkey
         this.writebackPolicy = writebackPolicy(writeback)
     }
-    get(key) {
-        return this.conn.redis.hget(this.hkey, key).then(data => this.conn.fromRedis(data))
+    async get(key) {
+        const data = await this.conn.redis.hget(this.hkey, key)
+        return this.conn.fromRedis(data, () => this.fallback(key))
     }
     set(key, value) {
         const data = this.conn.toRedis(value, value => this.writeback(key, value))
         return this.conn.redis.hset(this.hkey, key, data)
+    }
+    fallback(key) {
+        // getting the key failed (was a promise, peer died)
+        // write back (without waiting) a null so we don't repeat this process over nd over
+        this.writeback(key, null)
+        return null
     }
     writeback(key, value) {
         // different behavior on errors
@@ -206,12 +231,12 @@ function writebackPolicy(policy) {
     if (Function.isFunction(policy)) return functionPolicy(policy)
 }
 function noErrors(value) {
-    return !Tombstone.isTombstone(value)
+    return !(value instanceof Tombstone)
 }
 function anyValue(value) {
     return true
 }
 function functionPolicy(errorFunction) {
-    return !Tombstone.isTombstone(value) || errorFunction(value.error)
+    return value => !(value instanceof Tombstone) || errorFunction(value.error)
 }
 exports.RedisMap = RedisMap
