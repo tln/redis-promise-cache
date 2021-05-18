@@ -1,10 +1,11 @@
-const {RedisMap, close, redis, sub, ping, client} = require('./index')
+const RPCache = require('./index')
+const cache = await RPCache()
 
 function wait(ms, value) {
     return new Promise(done => setTimeout(() => done(value), ms))
 }
 async function test() {
-    const m = new RedisMap('foo:')
+    const m = connection.Map('foo:')
     await m.set('foo', 'bar')
     console.log(await m.get('foo'))
     console.log(await m.get('foo2'))
