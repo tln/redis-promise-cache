@@ -10,7 +10,7 @@ exports.connect = connect
 
 class Connection {
     constructor(redisOptions={}) {
-        redisOptions = {...redisOptions, lazyConnect = true};
+        redisOptions = {...redisOptions, lazyConnect: true};
         this.redis = new Redis(redisOptions)
         this.sub = new Redis(redisOptions)
         this.client = 'client_'+Date.now()+'_'+process.pid
