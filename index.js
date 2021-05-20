@@ -224,7 +224,7 @@ class RedisMap {
     }
     delete(key) {
         // TODO handle with promises
-        return redis.hdel(this.hkey, key)
+        return this.conn.redis.hdel(this.hkey, key)
     }
     dump() {
         console.log('Dump not implemented')
