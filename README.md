@@ -1,8 +1,8 @@
 # Redis promise cache
 
-This presents a Map interface over redis that allows promises. The intended use is for a cache where missing items are fetched. Then when the fetch is started, the promise for the fetch is put into the cache,. When the fetch completes, the cache is updated.
+This presents a Map interface over redis that allows promises. The intended use is for a cache where missing items are fetched. Then when the fetch is started, the promise for the fetch is put into the cache. When the fetch completes, the cache is updated.
 
-We don't assume the promise will be frequested by the same process that fulfilled it; this module implements a way for other processes to request and also verify that the fulfilling process is alive.
+We don't assume the promise will be requested by the same process that fulfilled it; this module implements a way for other processes to request and also verify that the fulfilling process is alive.
 
 ## Usage
 
